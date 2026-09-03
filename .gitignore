@@ -1,0 +1,41 @@
+# Build artifacts
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+coverage.out
+
+# Local config & secrets
+.env
+*.env
+!.env.example
+.mycloud/
+~/.mygocloud/
+
+# Generated files
+all_files.txt
+command_to_execute_to_one.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dependencies (if vendored)
+vendor/
+
+# Temp
+tmp/
+*.log

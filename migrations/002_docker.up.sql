@@ -1,0 +1,2 @@
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS docker_image VARCHAR(255);
+ALTER TABLE deployments ADD COLUMN IF NOT EXISTS container_id VARCHAR(255);

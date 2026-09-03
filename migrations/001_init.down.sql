@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS deployments;
+DROP TABLE IF EXISTS application;
+DROP TABLE IF EXISTS users;
+DROP EXTENSION IF EXISTS "uuid-ossp"
