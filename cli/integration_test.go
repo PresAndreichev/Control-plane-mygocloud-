@@ -14,9 +14,11 @@ import (
 	cliconfig "control-plane/cli/config"
 	"control-plane/internal/config"
 	"control-plane/internal/domain"
+	"control-plane/internal/queue/channel"
 	"control-plane/internal/repository/memory"
 	"control-plane/internal/server"
 	"control-plane/internal/service"
+	"control-plane/internal/worker"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,8 +45,14 @@ func setupIntegrationCLI(t *testing.T) (*httptest.Server, func()) {
 	depRepo := memory.NewDeploymentRepository()
 	userRepo := memory.NewUserRepository()
 
+	q := channel.New(100)
+	exec := &noopExecutor{}
+	w := worker.NewWithPoll(q, appRepo, depRepo, exec, 2, 10*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
 	appSvc := service.NewApplicationService(appRepo)
-	depSvc := service.NewDeploymentServiceWithPoll(appRepo, depRepo, &noopExecutor{}, 10*time.Millisecond)
+	depSvc := service.NewDeploymentService(appRepo, depRepo, q, exec)
 	userSvc := service.NewUserService(userRepo)
 
 	srv := server.New(&config.Config{
@@ -57,6 +65,8 @@ func setupIntegrationCLI(t *testing.T) (*httptest.Server, func()) {
 
 	ts := httptest.NewServer(srv.Router())
 
+	require.NoError(t, w.Start(ctx))
+
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpDir)
@@ -65,6 +75,9 @@ func setupIntegrationCLI(t *testing.T) (*httptest.Server, func()) {
 
 	return ts, func() {
 		ts.Close()
+		cancel()
+		_ = q.Close()
+		w.Stop()
 		os.Setenv("HOME", oldHome)
 	}
 }

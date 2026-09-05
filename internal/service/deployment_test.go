@@ -3,14 +3,13 @@ package service
 import (
 	"context"
 	"testing"
-	"time"
 
 	"control-plane/internal/domain"
+	"control-plane/internal/queue"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"github.com/stretchr/testify/require"
 )
 
 // --- Mocks ---
@@ -106,13 +105,33 @@ func (m *mockExecutor) Stop(ctx context.Context, containerID string) error {
 	return args.Error(0)
 }
 
+type mockQueue struct {
+	mock.Mock
+}
+
+func (m *mockQueue) Publish(ctx context.Context, job queue.DeploymentJob) error {
+	args := m.Called(ctx, job)
+	return args.Error(0)
+}
+
+func (m *mockQueue) Consume(ctx context.Context) (<-chan queue.DeploymentJob, error) {
+	args := m.Called(ctx)
+	return args.Get(0).(<-chan queue.DeploymentJob), args.Error(1)
+}
+
+func (m *mockQueue) Close() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
 // --- Tests ---
 
 func TestDeploymentService_Deploy_Success(t *testing.T) {
 	appRepo := new(mockAppRepo)
 	depRepo := new(mockDepRepo)
+	q := new(mockQueue)
 	exec := new(mockExecutor)
-	svc := NewDeploymentServiceWithPoll(appRepo, depRepo, exec, 10*time.Millisecond)
+	svc := NewDeploymentService(appRepo, depRepo, q, exec)
 
 	appID := uuid.New()
 	version := "1.2.3"
@@ -120,41 +139,29 @@ func TestDeploymentService_Deploy_Success(t *testing.T) {
 	appRepo.On("GetByID", mock.Anything, appID).Return(&domain.Application{
 		ID: appID, Name: "app", DockerImage: "nginx",
 	}, nil)
-	depRepo.On("ListByApplication", mock.Anything, appID).Return([]domain.Deployment{}, nil)
 	depRepo.On("Create", mock.Anything, mock.MatchedBy(func(d *domain.Deployment) bool {
 		return d.ApplicationID == appID && d.Version == version && d.Status == "pending"
 	})).Return(nil)
-
-	// 1. UpdateStatus to running (pulling image)
-	depRepo.On("UpdateStatus", mock.Anything, mock.AnythingOfType("uuid.UUID"), "running", mock.Anything).Return(nil).Once()
-	depRepo.On("UpdateContainerID", mock.Anything, mock.AnythingOfType("uuid.UUID"), "container-abc").Return(nil).Once()
-
-	exec.On("Deploy", mock.Anything, appID.String(), mock.AnythingOfType("string"), "nginx", version).Return("container-abc", nil)
-	// First poll: container is still starting
-	exec.On("Status", mock.Anything, "container-abc").Return("pending", nil).Once()
-	// Second poll: container exited successfully
-	exec.On("Status", mock.Anything, "container-abc").Return("successful", nil).Once()
-
-	depRepo.On("UpdateStatus", mock.Anything, mock.AnythingOfType("uuid.UUID"), "successful", mock.Anything).Return(nil).Once()
+	q.On("Publish", mock.Anything, mock.MatchedBy(func(job queue.DeploymentJob) bool {
+		return job.ApplicationID == appID.String() && job.Version == version && job.Image == "nginx"
+	})).Return(nil)
 
 	dep, err := svc.Deploy(context.Background(), appID, version)
 
 	assert.NoError(t, err)
 	assert.Equal(t, "pending", dep.Status)
-
-	// Wait for async goroutine
-	time.Sleep(100 * time.Millisecond)
-
+	assert.Equal(t, version, dep.Version)
 	appRepo.AssertExpectations(t)
 	depRepo.AssertExpectations(t)
-	exec.AssertExpectations(t)
+	q.AssertExpectations(t)
 }
 
 func TestDeploymentService_Deploy_AppNotFound(t *testing.T) {
 	appRepo := new(mockAppRepo)
 	depRepo := new(mockDepRepo)
+	q := new(mockQueue)
 	exec := new(mockExecutor)
-	svc := NewDeploymentService(appRepo, depRepo, exec)
+	svc := NewDeploymentService(appRepo, depRepo, q, exec)
 
 	appID := uuid.New()
 	appRepo.On("GetByID", mock.Anything, appID).Return(nil, domain.ErrNotFound)
@@ -168,8 +175,9 @@ func TestDeploymentService_Deploy_AppNotFound(t *testing.T) {
 func TestDeploymentService_Deploy_InvalidVersion(t *testing.T) {
 	appRepo := new(mockAppRepo)
 	depRepo := new(mockDepRepo)
+	q := new(mockQueue)
 	exec := new(mockExecutor)
-	svc := NewDeploymentService(appRepo, depRepo, exec)
+	svc := NewDeploymentService(appRepo, depRepo, q, exec)
 
 	dep, err := svc.Deploy(context.Background(), uuid.New(), "")
 
@@ -177,49 +185,65 @@ func TestDeploymentService_Deploy_InvalidVersion(t *testing.T) {
 	assert.Nil(t, dep)
 }
 
+func TestDeploymentService_Deploy_QueuePublishFails(t *testing.T) {
+	appRepo := new(mockAppRepo)
+	depRepo := new(mockDepRepo)
+	q := new(mockQueue)
+	exec := new(mockExecutor)
+	svc := NewDeploymentService(appRepo, depRepo, q, exec)
+
+	appID := uuid.New()
+	version := "1.0.0"
+
+	appRepo.On("GetByID", mock.Anything, appID).Return(&domain.Application{
+		ID: appID, DockerImage: "nginx",
+	}, nil)
+	depRepo.On("Create", mock.Anything, mock.Anything).Return(nil)
+	q.On("Publish", mock.Anything, mock.Anything).Return(assert.AnError)
+	depRepo.On("UpdateStatus", mock.Anything, mock.AnythingOfType("uuid.UUID"), "failed", mock.Anything).Return(nil)
+
+	dep, err := svc.Deploy(context.Background(), appID, version)
+
+	assert.Error(t, err)
+	assert.Nil(t, dep)
+	depRepo.AssertExpectations(t)
+}
+
 func TestDeploymentService_Rollback_Success(t *testing.T) {
 	appRepo := new(mockAppRepo)
 	depRepo := new(mockDepRepo)
+	q := new(mockQueue)
 	exec := new(mockExecutor)
-	svc := NewDeploymentServiceWithPoll(appRepo, depRepo, exec, 10*time.Millisecond)
+	svc := NewDeploymentService(appRepo, depRepo, q, exec)
 
 	appID := uuid.New()
 	lastDep := &domain.Deployment{ID: uuid.New(), ApplicationID: appID, Version: "1.1.0", Status: "successful"}
 
 	appRepo.On("GetByID", mock.Anything, appID).Return(&domain.Application{ID: appID, DockerImage: "nginx"}, nil)
 	depRepo.On("GetLastSuccessful", mock.Anything, appID).Return(lastDep, nil)
-	depRepo.On("ListByApplication", mock.Anything, appID).Return([]domain.Deployment{}, nil)
 	depRepo.On("Create", mock.Anything, mock.MatchedBy(func(d *domain.Deployment) bool {
-		return d.Version == "1.1.0" && d.Status == "pending"
+		return d.Version == "1.1.0" && d.Status == "pending" && d.Message == "Rollback to version 1.1.0"
 	})).Return(nil)
-
-	depRepo.On("UpdateStatus", mock.Anything, mock.AnythingOfType("uuid.UUID"), "running", mock.Anything).Return(nil).Once()
-	depRepo.On("UpdateContainerID", mock.Anything, mock.AnythingOfType("uuid.UUID"), "container-rollback").Return(nil).Once()
-
-	exec.On("Deploy", mock.Anything, appID.String(), mock.AnythingOfType("string"), "nginx", "1.1.0").Return("container-rollback", nil)
-	exec.On("Status", mock.Anything, "container-rollback").Return("pending", nil).Once()
-	exec.On("Status", mock.Anything, "container-rollback").Return("successful", nil).Once()
-
-	depRepo.On("UpdateStatus", mock.Anything, mock.AnythingOfType("uuid.UUID"), "successful", mock.Anything).Return(nil).Once()
+	q.On("Publish", mock.Anything, mock.MatchedBy(func(job queue.DeploymentJob) bool {
+		return job.ApplicationID == appID.String() && job.Version == "1.1.0"
+	})).Return(nil)
 
 	dep, err := svc.Rollback(context.Background(), appID)
 
 	assert.NoError(t, err)
 	assert.Equal(t, "1.1.0", dep.Version)
 	assert.Equal(t, "pending", dep.Status)
-
-	time.Sleep(100 * time.Millisecond)
-
 	appRepo.AssertExpectations(t)
 	depRepo.AssertExpectations(t)
-	exec.AssertExpectations(t)
+	q.AssertExpectations(t)
 }
 
 func TestDeploymentService_Rollback_NoSuccessfulDeployment(t *testing.T) {
 	appRepo := new(mockAppRepo)
 	depRepo := new(mockDepRepo)
+	q := new(mockQueue)
 	exec := new(mockExecutor)
-	svc := NewDeploymentService(appRepo, depRepo, exec)
+	svc := NewDeploymentService(appRepo, depRepo, q, exec)
 
 	appID := uuid.New()
 	appRepo.On("GetByID", mock.Anything, appID).Return(&domain.Application{ID: appID}, nil)
@@ -234,14 +258,14 @@ func TestDeploymentService_Rollback_NoSuccessfulDeployment(t *testing.T) {
 func TestDeploymentService_ListByApplication(t *testing.T) {
 	appRepo := new(mockAppRepo)
 	depRepo := new(mockDepRepo)
+	q := new(mockQueue)
 	exec := new(mockExecutor)
-	svc := NewDeploymentService(appRepo, depRepo, exec)
+	svc := NewDeploymentService(appRepo, depRepo, q, exec)
 
 	appID := uuid.New()
 	expected := []domain.Deployment{
 		{ID: uuid.New(), ApplicationID: appID, Version: "1.0.0"},
 	}
-
 	depRepo.On("ListByApplication", mock.Anything, appID).Return(expected, nil)
 
 	deps, err := svc.ListByApplication(context.Background(), appID)
@@ -254,14 +278,15 @@ func TestDeploymentService_ListByApplication(t *testing.T) {
 func TestDeploymentService_GetLogs(t *testing.T) {
 	appRepo := new(mockAppRepo)
 	depRepo := new(mockDepRepo)
+	q := new(mockQueue)
 	exec := new(mockExecutor)
-	svc := NewDeploymentService(appRepo, depRepo, exec)
+	svc := NewDeploymentService(appRepo, depRepo, q, exec)
 
 	exec.On("Logs", mock.Anything, "container-123", 50).Return("log line 1\nlog line 2", nil)
 
 	logs, err := svc.GetLogs(context.Background(), "container-123", 50)
 
-	require.NoError(t, err)
+	assert.NoError(t, err)
 	assert.Contains(t, logs, "log line 1")
 	exec.AssertExpectations(t)
 }
@@ -269,8 +294,9 @@ func TestDeploymentService_GetLogs(t *testing.T) {
 func TestDeploymentService_GetLogs_EmptyContainerID(t *testing.T) {
 	appRepo := new(mockAppRepo)
 	depRepo := new(mockDepRepo)
+	q := new(mockQueue)
 	exec := new(mockExecutor)
-	svc := NewDeploymentService(appRepo, depRepo, exec)
+	svc := NewDeploymentService(appRepo, depRepo, q, exec)
 
 	_, err := svc.GetLogs(context.Background(), "", 50)
 	assert.ErrorIs(t, err, domain.ErrInvalidInput)

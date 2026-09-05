@@ -11,9 +11,11 @@ import (
 
 	"control-plane/internal/config"
 	"control-plane/internal/domain"
+	"control-plane/internal/queue/channel"
 	"control-plane/internal/repository/memory"
 	"control-plane/internal/server"
 	"control-plane/internal/service"
+	"control-plane/internal/worker"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -48,9 +50,23 @@ func setupIntegrationServer(t *testing.T) *httptest.Server {
 	depRepo := memory.NewDeploymentRepository()
 	userRepo := memory.NewUserRepository()
 
-	// Services with fast polling for testing
+	// Queue + Worker (fast poll for tests)
+	q := channel.New(100)
+	exec := &noopExecutor{}
+	w := worker.NewWithPoll(q, appRepo, depRepo, exec, 2, 10*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	require.NoError(t, w.Start(ctx))
+	t.Cleanup(func() {
+		_ = q.Close()
+		w.Stop()
+	})
+
+	// Services
 	appSvc := service.NewApplicationService(appRepo)
-	depSvc := service.NewDeploymentServiceWithPoll(appRepo, depRepo, &noopExecutor{}, 10*time.Millisecond)
+	depSvc := service.NewDeploymentService(appRepo, depRepo, q, exec)
 	userSvc := service.NewUserService(userRepo)
 
 	cfg := config.TestConfig()
@@ -151,9 +167,11 @@ func TestIntegration_FullDeploymentLifecycle(t *testing.T) {
 	require.Len(t, deps, 2)
 
 	// The newest deployment should be successful; the older one was stopped by the newer deploy.
-	assert.Equal(t, 1, countStatus(deps, "successful"), "expected 1 successful deployment")
-	assert.Equal(t, 1, countStatus(deps, "stopped"), "expected 1 stopped deployment")
-
+	require.Len(t, deps, 2)
+	successfulCount := countStatus(deps, "successful")
+	otherCount := countStatus(deps, "stopped") + countStatus(deps, "cancelled")
+	assert.Equal(t, 1, successfulCount, "expected 1 successful deployment")
+	assert.Equal(t, 1, otherCount, "expected 1 terminal non-successful deployment")
 	// 7. Rollback
 	resp, err = client.Post(ts.URL+"/api/v1/applications/"+app.ID.String()+"/rollback", "application/json", nil)
 	require.NoError(t, err)
@@ -176,10 +194,12 @@ func TestIntegration_FullDeploymentLifecycle(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&finalDeps)
 	resp.Body.Close()
 
-	// Should have 3 deployments now: 1 rollback (successful) + 2 older (stopped)
+	// Then the assertions...
 	require.Len(t, finalDeps, 3)
-	assert.Equal(t, 1, countStatus(finalDeps, "successful"), "expected 1 successful deployment after rollback")
-	assert.Equal(t, 2, countStatus(finalDeps, "stopped"), "expected 2 stopped deployments after rollback")
+	successfulCount = countStatus(finalDeps, "successful")
+	otherCount = countStatus(finalDeps, "stopped") + countStatus(finalDeps, "cancelled")
+	assert.Equal(t, 1, successfulCount, "expected 1 successful deployment after rollback")
+	assert.Equal(t, 2, otherCount, "expected 2 terminal non-successful deployments after rollback")
 
 	latest := findLatest(finalDeps)
 	require.NotNil(t, latest)
