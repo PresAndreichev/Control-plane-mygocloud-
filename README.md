@@ -46,7 +46,7 @@ The CLI talks to the API over HTTP using JSON. The API talks to the database ove
 
 This separation allows the CLI and control plane to evolve independently while keeping Docker-specific orchestration logic on the server side.
 
-## 📨 Current Architecture — RabbitMQ
+## 📨 Current Architecture — RabbitMQ ( currently in branch called phase 4 in this repository)
 
 As the project evolves, asynchronous deployment processing is being moved toward a message-based architecture using RabbitMQ.
 
