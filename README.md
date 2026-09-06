@@ -1,5 +1,8 @@
-MyGoCloud Control Plane
+Absolutely. I’d keep your content and structure, but clean up the Markdown and convert all four existing diagrams to GitHub-compatible Mermaid blocks. I’d also make the current Phase 4/5 RabbitMQ status clearer.
 
+Here’s the complete revised README:
+
+MyGoCloud Control Plane
 A lightweight control plane for deploying containerized applications through a CLI.
 
 The CLI communicates exclusively through a Go HTTP API. The API manages application state in PostgreSQL and orchestrates Docker containers — there is no direct CLI-to-Docker coupling.
@@ -7,7 +10,6 @@ The CLI communicates exclusively through a Go HTTP API. The API manages applicat
 The long-term goal is to evolve MyGoCloud into a small cloud platform. For now, it is intentionally a tiny project that focuses on building the foundations of such a system.
 
 🎯 Why This Project?
-
 After graduating with a Bachelor's Degree in Computer Science, I decided to take a creative break from the programming industry.
 
 After spending a few months away from coding, I realized that the break was really from the university lifestyle — not from programming, building systems, and creating things.
@@ -19,7 +21,6 @@ This is one of my first larger personal projects where I deliberately chose not 
 I particularly enjoy system design and thinking about software at a larger scale, so MyGoCloud is an opportunity to explore those ideas while learning Go.
 
 🚀 What This Project Demonstrates
-
 MyGoCloud is designed as a small-scale example of how a real-world platform CLI could be structured, inspired by platforms such as Heroku, Fly.io, and Vercel.
 
 The project demonstrates:
@@ -27,13 +28,13 @@ The project demonstrates:
 Clean Architecture — domain, repository, service, and handler layers
 API-first architecture — the CLI communicates only with the HTTP API
 Dual Storage — in-memory repositories for fast testing and PostgreSQL for production
-Async Deployments — background goroutines for deployment processing and status polling
+Async Deployments — background workers for deployment processing and status polling
 Deployment Safety — application-level locking prevents concurrent deployments and rollbacks
 Container Orchestration — the control plane manages Docker container lifecycle
 Rollback Support — failed or unwanted deployments can be rolled back to a previous successful version
 CLI/API separation — Docker-specific logic remains entirely inside the control plane
+Message-based processing — RabbitMQ is being introduced for asynchronous deployment jobs
 🏗️ Architecture
-
 The core architectural principle is:
 
 CLI → HTTP API → Control Plane → Docker
@@ -56,18 +57,48 @@ flowchart LR
 
     CLI -.->|"No direct access"| Docker
 
-
 This separation allows the CLI and control plane to evolve independently while keeping Docker-specific orchestration logic on the server side.
 
-🚧 Build Phases
+📨 Current Architecture — RabbitMQ
+As the project evolves, asynchronous deployment processing is being moved toward a message-based architecture using RabbitMQ.
 
+The goal is to separate API requests from deployment execution and create a foundation for future workers and distributed processing.
+
+flowchart LR
+    CLI["mygocloud CLI"]
+    API["Control Plane API<br/>Go + Chi"]
+    DB[("PostgreSQL")]
+    MQ[["RabbitMQ"]]
+    Worker["Deployment Worker"]
+    Docker["Docker Engine"]
+
+    CLI -->|"HTTP / JSON"| API
+
+    API <-->|"SQL"| DB
+
+    API -->|"Publish deployment job"| MQ
+
+    MQ -->|"Consume job"| Worker
+
+    Worker -->|"Pull / Start / Stop"| Docker
+    Worker -->|"Update deployment status"| DB
+
+    CLI -.->|"No direct access"| Docker
+
+This introduces an additional boundary between the API and deployment execution:
+
+CLI → HTTP API → RabbitMQ → Worker → Docker
+
+The API is responsible for accepting and recording deployment requests, while workers are responsible for executing deployment jobs.
+
+🚧 Build Phases
 The project is being developed incrementally.
 
-The first public version covers Phases 1–3, with each phase introducing another layer of the system.
+Each phase introduces another layer of the system while keeping the architectural foundations established in previous phases.
 
 Phase 1 — Control Plane API
-
-Goal: Build the core HTTP API with PostgreSQL persistence.
+Goal
+Build the core HTTP API with PostgreSQL persistence.
 
 Implemented
 Go HTTP server using net/http + chi/v5
@@ -77,7 +108,12 @@ Applications
 Deployments
 PostgreSQL schema with migrations
 Relational structure:
-users → applications → deployments
+users
+  │
+  └── applications
+          │
+          └── deployments
+
 POST / GET endpoints
 Structured JSON error responses
 Domain layer with repository interfaces
@@ -91,12 +127,11 @@ INSERT / SELECT
 Client / curl
 Control Plane API
 ("PostgreSQL")
-
 The API acts as the central entry point for all platform operations.
 
 Phase 2 — MyGoCloud CLI
-
-Goal: Build a CLI that communicates exclusively with the Control Plane API.
+Goal
+Build a CLI that communicates exclusively with the Control Plane API.
 
 Implemented
 Cobra-based CLI
@@ -111,17 +146,19 @@ HTTP timeouts
 Error handling
 API request abstraction
 Output printer supporting:
-table
+Table
 JSON
 YAML
 CLI integration tests using httptest
 In-memory services for isolated testing
 CLI Architecture
-HTTP / JSON
-read / write
-mygocloud CLI
-Control Plane API
-~/.mygocloud/config.yaml
+flowchart LR
+    CLI["mygocloud CLI"]
+    API["Control Plane API"]
+    CONFIG["~/.mygocloud/config.yaml"]
+
+    CLI <-->|"HTTP / JSON"| API
+    CLI <-->|"read / write"| CONFIG
 
 The CLI is intentionally unaware of Docker.
 
@@ -131,12 +168,11 @@ No direct access
 mygocloud CLI
 Control Plane API
 Docker Engine
-
 This architectural boundary is one of the core design decisions of the project.
 
 Phase 3 — Docker Integration
-
-Goal: Introduce asynchronous container lifecycle management.
+Goal
+Introduce asynchronous container lifecycle management.
 
 Implemented
 docker.Executor implementing the Executor interface
@@ -144,15 +180,15 @@ Background deployment processing using goroutines
 Application-level mutex locks
 Container status polling
 Deployment lifecycle:
-pending → running → successful
-                    ↘ failed
-
+pending
+running
+successful
+failed
 Rollback support
 Active container management
 Previous successful version lookup
 Container logs through docker logs
 Deployment Flow
-
 A deployment is created through the API and processed asynchronously by the control plane.
 
 sequenceDiagram
@@ -181,7 +217,6 @@ sequenceDiagram
     API-->>CLI: successful
 
 🔄 Deployment Lifecycle
-
 A typical deployment goes through the following states:
 
 stateDiagram-v2
@@ -196,11 +231,9 @@ stateDiagram-v2
     Successful --> [*]
     Failed --> [*]
 
-
 The deployment state is persisted in PostgreSQL, allowing the API to expose deployment history independently from the CLI.
 
 🔙 Rollback
-
 Rollback finds the most recent successful deployment, stops the currently active container, and redeploys the previous successful version.
 
 sequenceDiagram
@@ -227,7 +260,6 @@ sequenceDiagram
     API-->>CLI: Rollback successful
 
 🧪 Testing
-
 The project contains several levels of testing, from isolated unit tests to CLI-to-API integration tests.
 
 Target	What It Runs	Purpose
@@ -248,11 +280,9 @@ make docker-up
 2. Start the API
 make run
 
-
 or:
 
 go run ./cmd/api
-
 
 The server starts on:
 
@@ -292,40 +322,35 @@ mygocloud app rollback <app-uuid>
 mygocloud viz logs <app-uuid> --follow
 
 📦 Example Deployment Scenario
-
 Imagine a developer wants to deploy:
 
 api-gateway:v1.0.0
 
-1. First deployment
+1. First Deployment
 mygocloud app deploy <app-id> --version 1.0.0
-
 
 The control plane:
 
 Create deployment
-pending
+Pending
 Pull image
 Start container
-running
-successful
-2. Deploy a new version
+Running
+Successful
+2. Deploy a New Version
 mygocloud app deploy <app-id> --version 1.1.0
-
 
 The control plane:
 
 Deploy 1.1.0
 Stop current container
 Start 1.1.0
-running
-successful
-
+Running
+Successful
 The previous container is stopped and the new version becomes active.
 
 3. Rollback
 mygocloud app rollback <app-id>
-
 
 The control plane:
 
@@ -333,7 +358,7 @@ Rollback
 Find last successful version
 Stop current container
 Redeploy previous version
-successful
+Successful
 📂 Project Structure
 .
 ├── cmd/
@@ -360,40 +385,66 @@ successful
 └── Makefile                 # Build and test automation
 
 🧠 Design Principles
-
-A few principles guide the architecture:
-
 API-first
-
 The CLI is a client of the Control Plane API rather than an orchestrator itself.
 
-Separation of concerns
+mygocloud CLI
+      │
+      │ HTTP / JSON
+      ▼
+Control Plane API
 
+The CLI does not contain Docker-specific logic.
+
+Separation of Concerns
 Docker-specific operations are isolated behind the Executor interface.
 
-Swappable infrastructure
+Deployment Service
+Executor Interface
+Docker Executor
+This allows the business logic to remain independent from the underlying container runtime.
 
+Swappable Infrastructure
 Repositories are defined through interfaces, allowing the application to use either in-memory implementations or PostgreSQL.
 
+Application Service
+Repository Interface
+In-Memory Repository
+PostgreSQL Repository
 Testability
-
 The architecture allows services, repositories, HTTP handlers, and CLI commands to be tested independently.
 
-Concurrency safety
-
+Domain / Services
+Repository
+HTTP Handler
+CLI API Client
+Unit Tests
+Integration Tests
+CLI Tests
+Concurrency Safety
 Application-level locking prevents conflicting deployments and rollbacks from running simultaneously for the same application.
 
-Incremental architecture
+Lock acquired
+Already locked
+Deployment Request
+Rollback Request
+Application Lock
+Execute operation
+Reject / wait
+Incremental Architecture
+The project is intentionally being built in phases.
 
-The project is intentionally being built in phases. Each phase adds another layer of functionality without abandoning the architectural foundations established in the previous one.
+Each phase adds another layer of functionality without abandoning the architectural foundations established in previous phases.
 
+Phase 1Control Plane API
+Phase 2CLI
+Phase 3Docker
+Phase 4RabbitMQ
+Phase 5Workers
 🛣️ Future Direction
-
 The long-term goal is to gradually evolve MyGoCloud from a small deployment control plane into a miniature cloud platform.
 
 Possible future phases include:
-
-(Currently working on phase 4 and phase 5 - adding RabbitMQ - you can check it out in the other branch called phase 4)
 
 Authentication and authorization
 API tokens
@@ -411,15 +462,12 @@ Multi-node container execution
 Kubernetes integration
 Web dashboard
 Cloud-provider integration
-
 The goal is not to immediately build a production cloud platform, but to grow the system incrementally and explore the engineering challenges that appear as the architecture becomes more complex.
 
 📌 Current Status
+Current version: Phases 1–3 completed, Phase 4–5 in development
 
-Current version: Phases 1–3
-
-The project currently provides:
-
+Completed
 REST API
 PostgreSQL persistence
 CLI client
@@ -430,5 +478,25 @@ Deployment history
 Rollbacks
 Container logs
 Automated testing
-
+Currently Working On
+RabbitMQ integration
+Message-based deployment processing
+Deployment workers
+Improved asynchronous architecture
 The project is intentionally small for now, but the architecture is designed to support future expansion.
+
+⭐ Project Philosophy
+MyGoCloud is not intended to compete with production cloud platforms.
+
+The goal is to build a small system, understand the engineering behind it, and gradually evolve it into something more complex.
+
+Each new phase is an opportunity to explore another real-world engineering problem:
+
+Foundation
+API Design
+Client Architecture
+Container Orchestration
+Distributed Messaging
+Background Workers
+Future Scaling
+The project is an ongoing exploration of Go, distributed systems, system design, and cloud infrastructure.
