@@ -143,7 +143,10 @@ func TestDeploymentService_Deploy_Success(t *testing.T) {
 		return d.ApplicationID == appID && d.Version == version && d.Status == "pending"
 	})).Return(nil)
 	q.On("Publish", mock.Anything, mock.MatchedBy(func(job queue.DeploymentJob) bool {
-		return job.ApplicationID == appID.String() && job.Version == version && job.Image == "nginx"
+		return job.Type == queue.JobTypeDeploy &&
+			job.ApplicationID == appID.String() &&
+			job.Version == version &&
+			job.Image == "nginx"
 	})).Return(nil)
 
 	dep, err := svc.Deploy(context.Background(), appID, version)
@@ -225,7 +228,9 @@ func TestDeploymentService_Rollback_Success(t *testing.T) {
 		return d.Version == "1.1.0" && d.Status == "pending" && d.Message == "Rollback to version 1.1.0"
 	})).Return(nil)
 	q.On("Publish", mock.Anything, mock.MatchedBy(func(job queue.DeploymentJob) bool {
-		return job.ApplicationID == appID.String() && job.Version == "1.1.0"
+		return job.Type == queue.JobTypeRollback &&
+			job.ApplicationID == appID.String() &&
+			job.Version == "1.1.0"
 	})).Return(nil)
 
 	dep, err := svc.Rollback(context.Background(), appID)

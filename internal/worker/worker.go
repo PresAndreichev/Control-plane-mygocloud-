@@ -4,6 +4,7 @@ import (
 	"context"
 	"control-plane/internal/domain"
 	"control-plane/internal/executor"
+	"control-plane/internal/lock"
 	"control-plane/internal/queue"
 	"fmt"
 	"log/slog"
@@ -14,36 +15,37 @@ import (
 	"github.com/google/uuid"
 )
 
+// DeploymentWorker consumes deployment jobs from a queue and executes them
+// via the Docker executor. Application-level distributed locking prevents
+// concurrent deploys/rollbacks for the same application across multiple
+// worker processes.
 type DeploymentWorker struct {
 	queue         queue.Queue
 	appRepo       domain.ApplicationRepository
 	depRepo       domain.DeploymentRepository
 	executor      executor.Executor
+	locker        lock.Locker
 	pollIntervals time.Duration
 	numWorkers    int
-
-	// appLocks ensures only one deployment per application is processed at a time.
-	// TODO: Replace with a distributed lock (Redis, PostgreSQL advisory locks, etc.)
-	// when scaling to multiple worker processes via RabbitMQ.
-	appLocks map[uuid.UUID]*sync.Mutex
-	locksMu  sync.Mutex
-	wg       sync.WaitGroup
+	wg            sync.WaitGroup
 }
 
-func New(q queue.Queue, appRepo domain.ApplicationRepository, depRepo domain.DeploymentRepository, executor executor.Executor, numWorkers int) *DeploymentWorker {
+// New creates a DeploymentWorker with the given dependencies.
+func New(q queue.Queue, appRepo domain.ApplicationRepository, depRepo domain.DeploymentRepository, executor executor.Executor, locker lock.Locker, numWorkers int) *DeploymentWorker {
 	return &DeploymentWorker{
 		queue:         q,
 		appRepo:       appRepo,
 		depRepo:       depRepo,
 		executor:      executor,
+		locker:        locker,
 		pollIntervals: 2 * time.Second,
 		numWorkers:    numWorkers,
-		appLocks:      make(map[uuid.UUID]*sync.Mutex),
 	}
 }
 
-func NewWithPoll(q queue.Queue, appRepo domain.ApplicationRepository, depRepo domain.DeploymentRepository, executor executor.Executor, numWorkers int, pollIntervals time.Duration) *DeploymentWorker {
-	w := New(q, appRepo, depRepo, executor, numWorkers)
+// NewWithPoll is a test helper that overrides the status-poll interval.
+func NewWithPoll(q queue.Queue, appRepo domain.ApplicationRepository, depRepo domain.DeploymentRepository, executor executor.Executor, locker lock.Locker, numWorkers int, pollIntervals time.Duration) *DeploymentWorker {
+	w := New(q, appRepo, depRepo, executor, locker, numWorkers)
 	w.pollIntervals = pollIntervals
 	return w
 }
@@ -63,9 +65,9 @@ func (w *DeploymentWorker) Start(ctx context.Context) error {
 }
 
 func (w *DeploymentWorker) Stop() {
-	slog.Info("Stopping deployment worker...")
+	slog.Info("stopping deployment worker...")
 	w.wg.Wait()
-	slog.Info("Deployment worker stopped")
+	slog.Info("deployment worker stopped")
 }
 
 func (w *DeploymentWorker) loop(ctx context.Context, jobs <-chan queue.DeploymentJob, workerID int) {
@@ -81,15 +83,6 @@ func (w *DeploymentWorker) loop(ctx context.Context, jobs <-chan queue.Deploymen
 			w.processJob(ctx, job, workerID)
 		}
 	}
-}
-
-func (w *DeploymentWorker) getAppLock(appID uuid.UUID) *sync.Mutex {
-	w.locksMu.Lock()
-	defer w.locksMu.Unlock()
-	if w.appLocks[appID] == nil {
-		w.appLocks[appID] = &sync.Mutex{}
-	}
-	return w.appLocks[appID]
 }
 
 func (w *DeploymentWorker) processJob(ctx context.Context, job queue.DeploymentJob, workerID int) {
@@ -116,13 +109,18 @@ func (w *DeploymentWorker) processJob(ctx context.Context, job queue.DeploymentJ
 
 	workCtx := context.Background()
 
-	lock := w.getAppLock(appID)
-	lock.Lock()
-	defer lock.Unlock()
+	// Distributed lock per application.
+	unlock, err := w.locker.Lock(workCtx, appID.String())
+	if err != nil {
+		slog.Error("failed to acquire app lock", "app_id", appID, "error", err)
+		_ = w.depRepo.UpdateStatus(workCtx, depID, "failed", "Failed to acquire lock: "+err.Error())
+		return
+	}
+	defer unlock()
 
 	deps, err := w.depRepo.ListByApplication(workCtx, appID)
 	if err != nil {
-		slog.Error("failed to list updates for deployments for stale check", "dep_ID", depID, "error", err)
+		slog.Error("failed to list deployments for stale check", "dep_id", depID, "error", err)
 	}
 
 	var latestID uuid.UUID
@@ -140,7 +138,6 @@ func (w *DeploymentWorker) processJob(ctx context.Context, job queue.DeploymentJ
 			slog.Error("failed to mark deployment cancelled", "dep_id", depID, "error", err)
 		}
 		return
-
 	}
 
 	for _, d := range deps {
@@ -169,12 +166,11 @@ func (w *DeploymentWorker) processJob(ctx context.Context, job queue.DeploymentJ
 		if image == "" {
 			image = "nginx"
 		}
-
 	}
 
 	slog.Info("starting docker deploy", "worker", workerID, "dep_id", depID, "image", image, "version", job.Version)
 
-	if err := w.depRepo.UpdateStatus(workCtx, depID, "running", "Pulling image"+image+":"+job.Version); err != nil {
+	if err := w.depRepo.UpdateStatus(workCtx, depID, "running", "Pulling image "+image+":"+job.Version); err != nil {
 		slog.Error("failed to mark deployment running", "dep_id", depID, "error", err)
 	}
 
@@ -205,7 +201,7 @@ func (w *DeploymentWorker) processJob(ctx context.Context, job queue.DeploymentJ
 			}
 			return
 		}
-		slog.Info("container status check", "dep_id", depID, "container_id", containerID, "status", status, "status", status)
+		slog.Info("container status check", "dep_id", depID, "container_id", containerID, "status", status)
 
 		switch status {
 		case "successful":

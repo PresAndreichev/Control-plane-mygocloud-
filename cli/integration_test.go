@@ -14,6 +14,7 @@ import (
 	cliconfig "control-plane/cli/config"
 	"control-plane/internal/config"
 	"control-plane/internal/domain"
+	lockmem "control-plane/internal/lock/memory"
 	"control-plane/internal/queue/channel"
 	"control-plane/internal/repository/memory"
 	"control-plane/internal/server"
@@ -47,7 +48,8 @@ func setupIntegrationCLI(t *testing.T) (*httptest.Server, func()) {
 
 	q := channel.New(100)
 	exec := &noopExecutor{}
-	w := worker.NewWithPoll(q, appRepo, depRepo, exec, 2, 10*time.Millisecond)
+	locker := lockmem.New()
+	w := worker.NewWithPoll(q, appRepo, depRepo, exec, locker, 2, 10*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 

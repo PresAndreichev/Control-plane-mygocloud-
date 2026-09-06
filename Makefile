@@ -1,14 +1,18 @@
-.PHONY: build build-cli test test-unit test-integration test-cli test-cli-integration run run-cli docker-up docker-down coverage lint deps install-cli
+.PHONY: build build-cli build-worker test test-unit test-integration test-cli test-cli-integration run run-cli run-worker docker-up docker-down coverage lint deps install-cli
 
 # API
 build:
+	@mkdir -p bin
 	go build -o bin/api ./cmd/api
+	@chmod +x bin/api 
+
 
 run: build
 	./bin/api
 
 # CLI
 build-cli:
+	@mkdir -p bin
 	go build -o bin/mygocloud ./cmd/mygocloud
 
 install-cli: build-cli
@@ -17,6 +21,14 @@ install-cli: build-cli
 
 run-cli: build-cli
 	./bin/mygocloud
+
+# Worker
+build-worker:
+	@mkdir -p bin
+	go build -o bin/worker ./cmd/worker
+
+run-worker: build-worker
+	./bin/worker
 
 # Tests
 test: test-unit test-integration test-cli test-cli-integration
@@ -50,4 +62,4 @@ lint:
 
 deps:
 	go mod download
-	go mod tidy
+	go mod tidy 

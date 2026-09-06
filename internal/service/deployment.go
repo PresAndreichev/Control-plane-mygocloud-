@@ -56,6 +56,7 @@ func (s *deploymentService) Deploy(ctx context.Context, appID uuid.UUID, version
 	}
 
 	job := queue.DeploymentJob{
+		Type:          queue.JobTypeDeploy,
 		DeploymentID:  dep.ID.String(),
 		ApplicationID: appID.String(),
 		Image:         app.DockerImage,
@@ -90,7 +91,6 @@ func (s *deploymentService) Rollback(ctx context.Context, appID uuid.UUID) (*dom
 		return nil, err
 	}
 
-	// Container stopping is now handled by the worker when it processes the rollback job.
 	dep := &domain.Deployment{
 		ID:            uuid.New(),
 		ApplicationID: appID,
@@ -106,6 +106,7 @@ func (s *deploymentService) Rollback(ctx context.Context, appID uuid.UUID) (*dom
 	}
 
 	job := queue.DeploymentJob{
+		Type:          queue.JobTypeRollback,
 		DeploymentID:  dep.ID.String(),
 		ApplicationID: appID.String(),
 		Image:         "", // Worker will resolve from application record

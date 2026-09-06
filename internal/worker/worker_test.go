@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"control-plane/internal/domain"
+	"control-plane/internal/lock/memory"
 	"control-plane/internal/queue"
 	"control-plane/internal/queue/channel"
 
@@ -115,8 +116,9 @@ func TestWorker_Deploy_Success(t *testing.T) {
 	depRepo := new(mockDepRepo)
 	exec := new(mockExecutor)
 	q := channel.New(10)
+	locker := memory.New()
 
-	w := NewWithPoll(q, appRepo, depRepo, exec, 1, 10*time.Millisecond)
+	w := NewWithPoll(q, appRepo, depRepo, exec, locker, 1, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	require.NoError(t, w.Start(ctx))
@@ -144,6 +146,7 @@ func TestWorker_Deploy_Success(t *testing.T) {
 	depRepo.On("UpdateStatus", mock.Anything, depID, "successful", mock.Anything).Return(nil).Once()
 
 	err := q.Publish(ctx, queue.DeploymentJob{
+		Type:          queue.JobTypeDeploy,
 		DeploymentID:  depID.String(),
 		ApplicationID: appID.String(),
 		Image:         "", // forces lookup
@@ -163,8 +166,9 @@ func TestWorker_Deploy_StaleDeployment(t *testing.T) {
 	depRepo := new(mockDepRepo)
 	exec := new(mockExecutor)
 	q := channel.New(10)
+	locker := memory.New()
 
-	w := NewWithPoll(q, appRepo, depRepo, exec, 1, 10*time.Millisecond)
+	w := NewWithPoll(q, appRepo, depRepo, exec, locker, 1, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	require.NoError(t, w.Start(ctx))
@@ -186,6 +190,7 @@ func TestWorker_Deploy_StaleDeployment(t *testing.T) {
 	depRepo.On("UpdateStatus", mock.Anything, oldDepID, "cancelled", mock.Anything).Return(nil).Once()
 
 	err := q.Publish(ctx, queue.DeploymentJob{
+		Type:          queue.JobTypeDeploy,
 		DeploymentID:  oldDepID.String(),
 		ApplicationID: appID.String(),
 		Image:         "nginx",
@@ -204,8 +209,9 @@ func TestWorker_Deploy_DockerFail(t *testing.T) {
 	depRepo := new(mockDepRepo)
 	exec := new(mockExecutor)
 	q := channel.New(10)
+	locker := memory.New()
 
-	w := NewWithPoll(q, appRepo, depRepo, exec, 1, 10*time.Millisecond)
+	w := NewWithPoll(q, appRepo, depRepo, exec, locker, 1, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	require.NoError(t, w.Start(ctx))
@@ -228,6 +234,7 @@ func TestWorker_Deploy_DockerFail(t *testing.T) {
 	depRepo.On("UpdateStatus", mock.Anything, depID, "failed", mock.Anything).Return(nil).Once()
 
 	err := q.Publish(ctx, queue.DeploymentJob{
+		Type:          queue.JobTypeDeploy,
 		DeploymentID:  depID.String(),
 		ApplicationID: appID.String(),
 		Image:         "",

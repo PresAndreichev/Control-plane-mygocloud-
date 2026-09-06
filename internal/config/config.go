@@ -9,6 +9,7 @@ import (
 type Config struct {
 	ServerAddr string
 	DB         DBConfig
+	RabbitMQ   RabbitMQConfig
 }
 
 type DBConfig struct {
@@ -18,6 +19,10 @@ type DBConfig struct {
 	Password string
 	Database string
 	SSLMode  string
+}
+
+type RabbitMQConfig struct {
+	URL string
 }
 
 func (c DBConfig) DSN() string {
@@ -37,6 +42,9 @@ func Load() *Config {
 			Database: getEnv("DB_NAME", "controlplane"),
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 		},
+		RabbitMQ: RabbitMQConfig{
+			URL: getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"),
+		},
 	}
 }
 
@@ -51,5 +59,8 @@ func TestConfig() *Config {
 	return &Config{
 		ServerAddr: "127.0.0.1:0",
 		DB:         DBConfig{},
+		RabbitMQ: RabbitMQConfig{
+			URL: "amqp://guest:guest@localhost:5672/",
+		},
 	}
 }

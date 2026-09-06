@@ -16,6 +16,7 @@ func TestLoad_Defaults(t *testing.T) {
 	os.Unsetenv("DB_PASSWORD")
 	os.Unsetenv("DB_NAME")
 	os.Unsetenv("DB_SSLMODE")
+	os.Unsetenv("RABBITMQ_URL")
 
 	cfg := Load()
 
@@ -26,6 +27,7 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, "controlplane", cfg.DB.Password)
 	assert.Equal(t, "controlplane", cfg.DB.Database)
 	assert.Equal(t, "disable", cfg.DB.SSLMode)
+	assert.Equal(t, "amqp://guest:guest@localhost:5672/", cfg.RabbitMQ.URL)
 }
 
 func TestLoad_CustomEnv(t *testing.T) {
@@ -36,6 +38,7 @@ func TestLoad_CustomEnv(t *testing.T) {
 	os.Setenv("DB_PASSWORD", "secret")
 	os.Setenv("DB_NAME", "prod")
 	os.Setenv("DB_SSLMODE", "require")
+	os.Setenv("RABBITMQ_URL", "amqp://admin:secret@mq.example.com:5672/")
 	defer func() {
 		os.Unsetenv("SERVER_ADDR")
 		os.Unsetenv("DB_HOST")
@@ -44,6 +47,7 @@ func TestLoad_CustomEnv(t *testing.T) {
 		os.Unsetenv("DB_PASSWORD")
 		os.Unsetenv("DB_NAME")
 		os.Unsetenv("DB_SSLMODE")
+		os.Unsetenv("RABBITMQ_URL")
 	}()
 
 	cfg := Load()
@@ -55,6 +59,7 @@ func TestLoad_CustomEnv(t *testing.T) {
 	assert.Equal(t, "secret", cfg.DB.Password)
 	assert.Equal(t, "prod", cfg.DB.Database)
 	assert.Equal(t, "require", cfg.DB.SSLMode)
+	assert.Equal(t, "amqp://admin:secret@mq.example.com:5672/", cfg.RabbitMQ.URL)
 }
 
 func TestDBConfig_DSN(t *testing.T) {
@@ -73,4 +78,5 @@ func TestDBConfig_DSN(t *testing.T) {
 func TestTestConfig(t *testing.T) {
 	cfg := TestConfig()
 	assert.Equal(t, "127.0.0.1:0", cfg.ServerAddr)
+	assert.Equal(t, "amqp://guest:guest@localhost:5672/", cfg.RabbitMQ.URL)
 }
