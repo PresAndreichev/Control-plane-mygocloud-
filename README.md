@@ -42,24 +42,7 @@ The core architectural principle is:
 
 The CLI never communicates directly with Docker. All application state and container orchestration are handled by the Control Plane API.
 
-```mermaid
-flowchart LR
-    CLI["mygocloud CLI"]
-    API["Control Plane API<br/>Go + Chi"]
-    DB[("PostgreSQL")]
-    Docker["Docker Engine"]
-```
-
-    CLI <-->|"HTTP / JSON"| API
-    API <-->|"SQL"| DB
-    API -->|"orchestrates"| Docker
-
-    Docker --> Pull["pull"]
-    Docker --> Run["run"]
-    Docker --> Logs["logs"]
-
-    CLI -.->|"No direct access"| Docker
-```
+The CLI talks to the API over HTTP using JSON. The API talks to the database over SQL. The API also orchestrates Docker directly, issuing pull, run, and logs operations against the Docker Engine. The CLI has no direct access to Docker at any point — every container operation is initiated by the API on the CLI's behalf.
 
 This separation allows the CLI and control plane to evolve independently while keeping Docker-specific orchestration logic on the server side.
 
@@ -69,25 +52,7 @@ As the project evolves, asynchronous deployment processing is being moved toward
 
 The goal is to separate API requests from deployment execution and create a foundation for future workers and distributed processing.
 
-```mermaid
-flowchart LR
-    CLI["mygocloud CLI"]
-    API["Control Plane API<br/>Go + Chi"]
-    DB[("PostgreSQL")]
-    MQ[["RabbitMQ"]]
-    Worker["Deployment Worker"]
-    Docker["Docker Engine"]
-```
-
-    CLI -->|"HTTP / JSON"| API
-    API <-->|"SQL"| DB
-    API -->|"Publish deployment job"| MQ
-    MQ -->|"Consume job"| Worker
-    Worker -->|"Pull / Start / Stop"| Docker
-    Worker -->|"Update deployment status"| DB
-
-    CLI -.->|"No direct access"| Docker
-```
+In this architecture, the CLI sends an HTTP/JSON request to the Control Plane API (built with Go and Chi). The API reads and writes to PostgreSQL over SQL, and instead of talking to Docker directly, it publishes a deployment job to RabbitMQ. A separate Deployment Worker consumes that job from the queue, and performs the pull, start, and stop operations against the Docker Engine. The worker then writes the updated deployment status back to PostgreSQL. As before, the CLI never has direct access to Docker.
 
 This introduces an additional boundary between the API and deployment execution:
 
@@ -128,19 +93,7 @@ Build the core HTTP API with PostgreSQL persistence.
 
 #### Request Flow
 
-```text
-POST /users
-GET /applications
-      │
-      ▼
-Control Plane API
-      │
-      ▼
-INSERT / SELECT
-      │
-      ▼
-PostgreSQL
-```
+A request such as `POST /users` or `GET /applications` is received by the Control Plane API, which then performs an `INSERT` or `SELECT` against PostgreSQL to fulfill it.
 
 The API acts as the central entry point for all platform operations.
 
@@ -172,16 +125,7 @@ Build a CLI that communicates exclusively with the Control Plane API.
 
 #### CLI Architecture
 
-```mermaid
-flowchart LR
-    CLI["mygocloud CLI"]
-    API["Control Plane API"]
-    CONFIG["~/.mygocloud/config.yaml"]
-```
-
-    CLI <-->|"HTTP / JSON"| API
-    CLI <-->|"read / write"| CONFIG
-```
+The CLI communicates with the Control Plane API over HTTP/JSON, and separately reads from and writes to its local configuration file at `~/.mygocloud/config.yaml`. These are the only two things the CLI talks to.
 
 The CLI is intentionally unaware of Docker.
 
@@ -213,54 +157,22 @@ Introduce asynchronous container lifecycle management.
 
 #### Deployment Flow
 
-A deployment is created through the API and processed asynchronously by the control plane.
+A deployment is created through the API and processed asynchronously by the control plane. Concretely, the sequence of events is:
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant CLI as mygocloud CLI
-    participant API as Control Plane API
-    participant DB as PostgreSQL
-    participant Docker as Docker Engine
-```
-
-    User->>CLI: app deploy <app-id> --version 1.0.0
-
-    CLI->>API: POST /deployments
-    API->>DB: Create deployment
-    DB-->>API: deployment = pending
-    API-->>CLI: Deployment created
-
-    API->>Docker: Pull image
-    Docker-->>API: Image ready
-
-    API->>Docker: Start container
-    Docker-->>API: Container running
-
-    API->>DB: Update status = successful
-
-    CLI->>API: GET deployment status
-    API-->>CLI: successful
-```
+1. The user runs `app deploy <app-id> --version 1.0.0` on the CLI.
+2. The CLI sends `POST /deployments` to the API.
+3. The API creates a deployment record in PostgreSQL, which comes back with status `pending`.
+4. The API immediately responds to the CLI confirming the deployment was created.
+5. The API then tells Docker to pull the image, and Docker confirms the image is ready.
+6. The API tells Docker to start the container, and Docker confirms the container is running.
+7. The API updates the deployment status in PostgreSQL to `successful`.
+8. Separately, the CLI can poll the API with `GET deployment status`, and the API returns the current status (e.g. `successful`).
 
 ## 🔄 Deployment Lifecycle
 
 A typical deployment goes through the following states:
 
-```mermaid
-stateDiagram-v2
-    [*] --> Pending
-```
-
-    Pending --> Running: Container started
-    Pending --> Failed: Pull/start error
-
-    Running --> Successful: Deployment completed
-    Running --> Failed: Container failure
-
-    Successful --> [*]
-    Failed --> [*]
-```
+A deployment starts in the **Pending** state. From there, if the container starts successfully it moves to **Running**; if the pull or start fails, it moves directly to **Failed**. From **Running**, the deployment moves to **Successful** once it completes, or to **Failed** if the container fails. Both **Successful** and **Failed** are terminal states.
 
 The deployment state is persisted in PostgreSQL, allowing the API to expose deployment history independently from the CLI.
 
@@ -268,31 +180,15 @@ The deployment state is persisted in PostgreSQL, allowing the API to expose depl
 
 Rollback finds the most recent successful deployment, stops the currently active container, and redeploys the previous successful version.
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant CLI as mygocloud CLI
-    participant API as Control Plane API
-    participant DB as PostgreSQL
-    participant Docker as Docker Engine
-```
+The sequence of events is:
 
-    User->>CLI: app rollback <app-id>
-
-    CLI->>API: POST /rollback
-    API->>DB: Find last successful deployment
-    DB-->>API: version 1.1.0
-
-    API->>Docker: Stop current container
-    Docker-->>API: Container stopped
-
-    API->>Docker: Redeploy version 1.1.0
-    Docker-->>API: Container running
-
-    API->>DB: Update deployment status
-
-    API-->>CLI: Rollback successful
-```
+1. The user runs `app rollback <app-id>` on the CLI.
+2. The CLI sends `POST /rollback` to the API.
+3. The API asks PostgreSQL for the last successful deployment, and gets back a version (e.g. `1.1.0`).
+4. The API tells Docker to stop the current container, and Docker confirms it has stopped.
+5. The API tells Docker to redeploy that previous version, and Docker confirms the container is running again.
+6. The API updates the deployment status in PostgreSQL.
+7. The API confirms to the CLI that the rollback was successful.
 
 ## 🧪 Testing
 
@@ -412,21 +308,7 @@ api-gateway:v1.0.0
 mygocloud app deploy <app-id> --version 1.0.0
 ```
 
-The control plane:
-
-```text
-Create deployment
-       ↓
-     Pending
-       ↓
-   Pull image
-       ↓
- Start container
-       ↓
-    Running
-       ↓
-   Successful
-```
+The control plane creates the deployment record, which starts as pending, then pulls the image, starts the container, moves to running, and finally becomes successful.
 
 ### 2. Deploy a New Version
 
@@ -434,19 +316,7 @@ Create deployment
 mygocloud app deploy <app-id> --version 1.1.0
 ```
 
-The control plane:
-
-```text
-Deploy 1.1.0
-     ↓
-Stop current container
-     ↓
-Start 1.1.0
-     ↓
-  Running
-     ↓
-Successful
-```
+The control plane stops the currently running container, starts the new version (1.1.0), moves it to running, and then marks it successful.
 
 The previous container is stopped and the new version becomes active.
 
@@ -456,19 +326,7 @@ The previous container is stopped and the new version becomes active.
 mygocloud app rollback <app-id>
 ```
 
-The control plane:
-
-```text
-Rollback
-   ↓
-Find last successful version
-   ↓
-Stop current container
-   ↓
-Redeploy previous version
-   ↓
-Successful
-```
+The control plane finds the last successful version, stops the current container, redeploys that previous version, and marks the deployment successful.
 
 ## 📂 Project Structure
 
@@ -502,109 +360,33 @@ Successful
 
 ### API-first
 
-The CLI is a client of the Control Plane API rather than an orchestrator itself.
-
-```mermaid
-flowchart LR
-    CLI["mygocloud CLI"]
-    API["Control Plane API"]
-    CLI -->|"HTTP / JSON"| API
-```
-```
+The CLI is a client of the Control Plane API rather than an orchestrator itself. The CLI talks to the Control Plane API purely over HTTP/JSON — nothing more.
 
 The CLI does not contain Docker-specific logic.
 
 ### Separation of Concerns
 
-Docker-specific operations are isolated behind the `Executor` interface.
-
-```mermaid
-flowchart LR
-    Service["Deployment Service"]
-    Interface["Executor Interface"]
-    Docker["Docker Executor"]
-```
-
-    Service --> Interface --> Docker
-```
+Docker-specific operations are isolated behind the `Executor` interface. The Deployment Service calls into the Executor Interface, which is implemented by the Docker Executor.
 
 This allows the business logic to remain independent from the underlying container runtime.
 
 ### Swappable Infrastructure
 
-Repositories are defined through interfaces, allowing the application to use either in-memory implementations or PostgreSQL.
-
-```mermaid
-flowchart LR
-    Service["Application Service"]
-    Interface["Repository Interface"]
-    Memory["In-Memory Repository"]
-    PostgreSQL["PostgreSQL Repository"]
-```
-
-    Service --> Interface
-    Interface --> Memory
-    Interface --> PostgreSQL
-```
+Repositories are defined through interfaces, allowing the application to use either in-memory implementations or PostgreSQL. The Application Service depends only on a Repository Interface, which can be backed by either an In-Memory Repository or a PostgreSQL Repository, depending on context (e.g. testing vs. production).
 
 ### Testability
 
-The architecture allows services, repositories, HTTP handlers, and CLI commands to be tested independently.
-
-```mermaid
-flowchart TD
-    Domain["Domain / Services"]
-    Repository["Repository"]
-    Handler["HTTP Handler"]
-    Client["CLI API Client"]
-```
-
-    Unit["Unit Tests"]
-    Integration["Integration Tests"]
-    CLI["CLI Tests"]
-
-    Domain --> Unit
-    Repository --> Unit
-    Handler --> Integration
-    Client --> CLI
-```
+The architecture allows services, repositories, HTTP handlers, and CLI commands to be tested independently. Domain/Services and Repository code are covered by unit tests. HTTP Handlers are covered by integration tests. The CLI API Client is covered by CLI tests.
 
 ### Concurrency Safety
 
-Application-level locking prevents conflicting deployments and rollbacks from running simultaneously for the same application.
-
-```mermaid
-flowchart LR
-    Deploy["Deployment Request"]
-    Rollback["Rollback Request"]
-    Lock["Application Lock"]
-    Execute["Execute operation"]
-    Reject["Reject / wait"]
-```
-
-    Deploy --> Lock
-    Rollback --> Lock
-    Lock -->|"Lock acquired"| Execute
-    Lock -->|"Already locked"| Reject
-```
+Application-level locking prevents conflicting deployments and rollbacks from running simultaneously for the same application. Both a Deployment Request and a Rollback Request must go through the same Application Lock: if the lock is acquired, the operation executes; if the application is already locked, the request is rejected or made to wait.
 
 ### Incremental Architecture
 
 The project is intentionally being built in phases.
 
-Each phase adds another layer of functionality without abandoning the architectural foundations established in previous phases.
-
-```mermaid
-flowchart LR
-    P1["Phase 1<br/>Control Plane API"]
-    P2["Phase 2<br/>CLI"]
-    P3["Phase 3<br/>Docker"]
-    P4["Phase 4<br/>RabbitMQ"]
-    P5["Phase 5<br/>Workers"]
-```
-
-    P1 --> P2 --> P3 --> P4 --> P5
-```
+Each phase adds another layer of functionality without abandoning the architectural foundations established in previous phases. The phases build on each other in order: Phase 1 (Control Plane API) leads to Phase 2 (CLI), which leads to Phase 3 (Docker), which leads to Phase 4 (RabbitMQ), which leads to Phase 5 (Workers).
 
 ## 🛣️ Future Direction
 
@@ -663,22 +445,6 @@ MyGoCloud is not intended to compete with production cloud platforms.
 
 The goal is to build a small system, understand the engineering behind it, and gradually evolve it into something more complex.
 
-Each new phase is an opportunity to explore another real-world engineering problem:
-
-```text
-Foundation
-    ↓
-API Design
-    ↓
-Client Architecture
-    ↓
-Container Orchestration
-    ↓
-Distributed Messaging
-    ↓
-Background Workers
-    ↓
-Future Scaling
-```
+Each new phase is an opportunity to explore another real-world engineering problem, moving progressively from Foundation, to API Design, to Client Architecture, to Container Orchestration, to Distributed Messaging, to Background Workers, and on to Future Scaling.
 
 The project is an ongoing exploration of Go, distributed systems, system design, and cloud infrastructure.
